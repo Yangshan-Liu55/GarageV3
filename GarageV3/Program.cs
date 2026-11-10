@@ -76,4 +76,12 @@ app.MapControllerRoute(
 
 app.MapRazorPages();
 
+// Azure/LocalDB migration
+using (var scope = app.Services.CreateScope())
+{
+    var services = scope.ServiceProvider;
+    var context = services.GetRequiredService<ApplicationDbContext>();
+    context.Database.Migrate(); // This automatically creates the database and tables in Azure. Safe to run on local, DevTest, and master
+}
+
 app.Run();
