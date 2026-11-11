@@ -1,19 +1,17 @@
 using GarageV3.Data;
-using GarageV3.Models.Entities;
-using GarageV3.Models.Enums;
 using GarageV3.Models.Parking;
 using GarageV3.Services;
 using GarageV3.Services.Interfaces;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.UI.Services;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
 
-// builder.Services.AddDbContext<ApplicationDbContext>(options => options.UseSqlServer(connectionString));
-// Retry 5 times when waiting Azure DB // EnableRetryOnFailure is from Entity Framework Core, SQL Server
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection")
+    ?? throw new InvalidOperationException("Connection string 'DefaultConnection' not found.");
+
+// Configure SQL Server and automatically retry connection failures (for Azure database cold starts)
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlServer(
         connectionString,
@@ -25,24 +23,20 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
                 errorNumbersToAdd: null);
         }));
 
-//builder.Services.Configure<DataProtectionTokenProviderOptions>(options =>
-//{
-//    options.TokenLifespan = TimeSpan.FromHours(3);
-//});
 builder.Services.AddTransient<IEmailSender, DevelopmentEmailSender>();
 
 builder.Services.AddDefaultIdentity<ApplicationUser>(options => {
     options.SignIn.RequireConfirmedAccount = false;
     options.SignIn.RequireConfirmedEmail = false;
-}).AddRoles<IdentityRole>()
-  .AddEntityFrameworkStores<ApplicationDbContext>();
+})
+.AddRoles<IdentityRole>()
+.AddEntityFrameworkStores<ApplicationDbContext>();
 
 builder.Services.AddControllersWithViews();
 builder.Services.AddRazorPages();
 
 builder.Services.AddScoped<IVehicleHandler, VehicleHandler>();
 builder.Services.AddScoped<GarageFeeService>();
-
 builder.Services.Configure<GarageSettings>(
     builder.Configuration.GetSection(GarageSettings.SectionName));
 builder.Services.AddScoped<IParkingSessionService, ParkingSessionService>();
@@ -51,20 +45,26 @@ builder.Services.AddScoped<IParkingAllocationService, ParkingAllocationService>(
 
 var app = builder.Build();
 
+// database migration and initialization when application startup
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
     try
     {
+        var context = services.GetRequiredService<ApplicationDbContext>();
+
+        // Automatically apply all unexecuted migrations (create the database if it does not exist).
+        await context.Database.MigrateAsync();
+
+        // Execute custom initialization seed data logic
         await DbInitializer.InitializeAsync(services);
     }
     catch (Exception ex)
     {
         var logger = services.GetRequiredService<ILogger<Program>>();
-        logger.LogError(ex, "Error occured during Database migration.");
+        logger.LogError(ex, "Error occured during Database migration or initialization.");
     }
 }
-
 
 if (!app.Environment.IsDevelopment())
 {
@@ -86,18 +86,5 @@ app.MapControllerRoute(
     .WithStaticAssets();
 
 app.MapRazorPages();
-
-// Azure/LocalDB migration
-using (var scope = app.Services.CreateScope())
-{
-    var services = scope.ServiceProvider;
-    var context = services.GetRequiredService<ApplicationDbContext>();
-
-    // If no pending, skip
-    if (context.Database.GetPendingMigrations().Any())
-    {
-        context.Database.Migrate(); // This automatically creates the database and tables in Azure. Safe to run on local, DevTest, and master
-    }
-}
 
 app.Run();

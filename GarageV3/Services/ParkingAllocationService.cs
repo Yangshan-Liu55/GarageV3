@@ -28,46 +28,53 @@ namespace GarageV3.Services
             var vehicleType = vehicle.VehicleTypeRef;
             var plan = await BuildAllocationPlanAsync(vehicleType.RequiredSpaceUnits, preferredSpotId);
 
-            if (plan == null)
+            if (plan == null || plan.Count == 0)
             {
                 return AllocationResult.Fail(preferredSpotId != null && preferredSpotId > 0 ?
                     $"The selected spot is not available for {vehicleType.Name} right now."
                     : $"No available spot(s) for {vehicleType.Name} right now.");
             }
 
-            using var transaction = await _context.Database.BeginTransactionAsync();
+            // Get the retry execution strategy for the current context
+            var strategy = _context.Database.CreateExecutionStrategy();
+
             try
             {
-                var session = new ParkingSession
+                return await strategy.ExecuteAsync(async () =>
                 {
-                    VehicleId = vehicleId,
-                    ParkingSpotId = plan[0].SpotId, // primary spot, kept for backward compatibility
-                    ArriveTime = DateTime.UtcNow,
-                    HourlyRateAtCheckIn = hourlyRate
-                };
+                    // Start and manage transactions within the strategy.
+                    using var transaction = await _context.Database.BeginTransactionAsync();
 
-                _context.ParkingSessions.Add(session);
-                await _context.SaveChangesAsync();
-
-                var allocations = plan
-                    .Select(p => new ParkingAllocation
+                    var session = new ParkingSession
                     {
-                        ParkingSessionId = session.Id,
-                        ParkingSpotId = p.SpotId,
-                        UnitsUsed = p.UnitsUsed
-                    })
-                    .ToList();
+                        VehicleId = vehicleId,
+                        ParkingSpotId = plan[0].SpotId,
+                        ArriveTime = DateTime.UtcNow,
+                        HourlyRateAtCheckIn = hourlyRate
+                    };
 
-                _context.ParkingAllocations.AddRange(allocations);
-                await _context.SaveChangesAsync();
+                    _context.ParkingSessions.Add(session);
+                    await _context.SaveChangesAsync();
 
-                await transaction.CommitAsync();
-                return AllocationResult.Ok(session, allocations);
+                    var allocations = plan
+                        .Select(p => new ParkingAllocation
+                        {
+                            ParkingSessionId = session.Id,
+                            ParkingSpotId = p.SpotId,
+                            UnitsUsed = p.UnitsUsed
+                        })
+                        .ToList();
+
+                    _context.ParkingAllocations.AddRange(allocations);
+                    await _context.SaveChangesAsync();
+
+                    await transaction.CommitAsync();
+                    return AllocationResult.Ok(session, allocations);
+                });
             }
-            catch
+            catch (Exception ex)
             {
-                await transaction.RollbackAsync();
-                return AllocationResult.Fail("Could not save the parking session. No changes were made.");
+                return AllocationResult.Fail($"Could not save the parking session: {ex.InnerException?.Message ?? ex.Message}");
             }
         }
 
